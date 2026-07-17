@@ -1,11 +1,12 @@
 /* Service worker — offline support for the flashcard app.
    App shell is precached; Google Fonts are runtime-cached on first online load
    so the pretty fonts also work offline afterwards (system fonts otherwise). */
-const VERSION = 'jpfc-v1';
+const VERSION = 'jpfc-v3';
 const SHELL = [
   './',
   './index.html',
   './words.js',
+  './questions.js',
   './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png',

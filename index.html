@@ -99,6 +99,7 @@
 </div>
 
 <script src="./words.js"></script>
+<script src="./questions.js"></script>
 <script>
 (function () {
   "use strict";
@@ -139,12 +140,15 @@
     jaVoice = vs.find(v => /ja(-|_)?JP/i.test(v.lang) || v.lang === 'ja') || null;
   }
   if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-  function speak(text) {
+  function speak(text, opts) {
+    opts = opts || {};
     try {
       if (!window.speechSynthesis) return;
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'ja-JP'; u.rate = settings.ttsRate;
+      u.lang = 'ja-JP';
+      u.rate = opts.rate != null ? opts.rate : settings.ttsRate;
+      u.pitch = opts.pitch != null ? opts.pitch : 1;
       if (jaVoice) u.voice = jaVoice;
       speechSynthesis.speak(u);
     } catch(e){}
@@ -317,9 +321,21 @@
           </div>
         </div>
       </div>
-      <div id="cta" style="cursor:pointer;background:linear-gradient(135deg,#8a76e8,#b58fe6);border-radius:22px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 16px 28px -14px rgba(138,118,232,.75);margin-bottom:26px;">
+      <div id="cta" style="cursor:pointer;background:linear-gradient(135deg,#8a76e8,#b58fe6);border-radius:22px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 16px 28px -14px rgba(138,118,232,.75);margin-bottom:14px;">
         <div><div style="font-size:17px;font-weight:700;color:#fff;">เริ่มเรียนวันนี้</div><div style="font-size:12px;color:#ece4ff;">ปัดการ์ดเพื่อทบทวนคำศัพท์</div></div>
         <div style="width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.22);display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;">→</div>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:26px;">
+        <div id="nav-exam" style="cursor:pointer;flex:1;background:#fff;border:1px solid #f1ebfb;border-radius:20px;padding:16px;box-shadow:0 8px 20px -16px rgba(124,107,214,.5);">
+          <div style="width:40px;height:40px;border-radius:13px;background:#f2eefb;color:#7c6bd6;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:10px;">📝</div>
+          <div style="font-size:14px;font-weight:700;color:#443c54;">ข้อสอบ JLPT</div>
+          <div style="font-size:11px;color:#a79fb6;margin-top:2px;">วัดระดับแบบจับเวลา</div>
+        </div>
+        <div id="nav-shadow" style="cursor:pointer;flex:1;background:#fff;border:1px solid #f1ebfb;border-radius:20px;padding:16px;box-shadow:0 8px 20px -16px rgba(124,107,214,.5);">
+          <div style="width:40px;height:40px;border-radius:13px;background:#eafaf3;color:#34b183;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:10px;">🎙</div>
+          <div style="font-size:14px;font-weight:700;color:#443c54;">ชาโดวิง</div>
+          <div style="font-size:11px;color:#a79fb6;margin-top:2px;">ฝึกออกเสียงตามเจ้าของภาษา</div>
+        </div>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
         <span style="font-size:16px;font-weight:700;color:#443c54;">ชุดคำศัพท์</span>
@@ -459,6 +475,364 @@
     </div>`;
   }
 
+  // ============================================================
+  //  Sequential TTS (listening dialogues / compare playback)
+  // ============================================================
+  let seqTimer = null;
+  function cancelSeq(){ if(seqTimer){ clearTimeout(seqTimer); seqTimer=null; } try{ if(window.speechSynthesis) speechSynthesis.cancel(); }catch(e){} }
+  function speakSeq(items, rate){
+    if(!window.speechSynthesis) return; cancelSeq();
+    let i=0;
+    (function next(){
+      if(i>=items.length) return;
+      const it=items[i++];
+      try{
+        const u=new SpeechSynthesisUtterance(it.text);
+        u.lang='ja-JP'; u.rate=rate||0.9; u.pitch=it.pitch||1;
+        if(jaVoice) u.voice=jaVoice;
+        u.onend=()=>{ seqTimer=setTimeout(next,350); };
+        u.onerror=()=>{ seqTimer=setTimeout(next,350); };
+        speechSynthesis.speak(u);
+      }catch(e){ seqTimer=setTimeout(next,350); }
+    })();
+  }
+
+  // ============================================================
+  //  EXAM MODE  (JLPT-style)
+  // ============================================================
+  const EXAM = window.JPFC_EXAM || {};
+  const EXAM_LEVELS = ['N5','N4','N3','N2','N1'];
+  const PART_META = { 1:{jp:'文字・語彙',th:'ตัวอักษร・คำศัพท์'}, 2:{jp:'文法・読解',th:'ไวยากรณ์・การอ่าน'}, 3:{jp:'聴解',th:'การฟัง'} };
+  const EXAM_TIME = { 15:10, 30:20, 45:30 };  // questions -> minutes
+  let examTimerId = null;
+  const ex = { lv:'N5', items:[], pos:0, answers:[], sel:-1, deadline:0, result:null };
+
+  // shuffle a question's choices and remap the answer index
+  function prepQuestion(q){ const o=q.choices.map((_,i)=>i); shuffle(o); return Object.assign({},q,{ choices:o.map(i=>q.choices[i]), a:o.indexOf(q.a) }); }
+
+  function sampleExam(lv,n){
+    const bank=(EXAM[lv]||[]).slice(); const byPart={1:[],2:[],3:[]};
+    bank.forEach(q=>{ if(byPart[q.part]) byPart[q.part].push(q); });
+    [1,2,3].forEach(p=>shuffle(byPart[p]));                 // shuffle within each part
+    const want={1:Math.round(n*0.40), 2:Math.round(n*0.33)}; // ~40% / ~33% / rest
+    want[3]=Math.max(0, n-want[1]-want[2]);
+    const take={}; let short=0;
+    [1,2,3].forEach(p=>{ take[p]=Math.min(want[p], byPart[p].length); short+=want[p]-take[p]; });
+    while(short>0){ let moved=false; for(const p of [1,2,3]){ if(short<=0) break; if(take[p]<byPart[p].length){ take[p]++; short--; moved=true; } } if(!moved) break; } // fill shortfall from parts that have spare
+    const out=[]; [1,2,3].forEach(p=>{ for(let i=0;i<take[p];i++) out.push(prepQuestion(byPart[p][i])); }); // parts in order 1->2->3
+    return out;
+  }
+  function examHistory(){ return load('jpfc_exam_history', []); }
+  function fmtTime(ms){ const s=Math.max(0,Math.ceil(ms/1000)); const m=Math.floor(s/60); const ss=s%60; return m+':'+(ss<10?'0':'')+ss; }
+  function stopExamTimer(){ if(examTimerId){ clearInterval(examTimerId); examTimerId=null; } }
+  function startExamTimer(){
+    stopExamTimer();
+    examTimerId=setInterval(()=>{
+      const left=ex.deadline-Date.now(); const el=$('exam-timer');
+      if(el){ el.textContent=fmtTime(left); if(left<=30000){ el.style.color='#ff6f9c'; el.style.background='#fff1f5'; } }
+      if(left<=0){ stopExamTimer(); finishExam(); }
+    },250);
+  }
+  function startExam(n){
+    const items=sampleExam(ex.lv,n);
+    if(!items.length){ alert('ยังไม่มีข้อสอบสำหรับระดับนี้'); return; }
+    ex.items=items; ex.pos=0; ex.answers=items.map(()=>-1); ex.sel=-1; ex.result=null; ex.fb=false;
+    const mins=EXAM_TIME[n]||Math.round(n*2/3); ex.deadline=Date.now()+mins*60000;
+    startExamTimer(); go('exam-q');
+  }
+  function selectChoice(i){ if(ex.fb) return; ex.sel=i; render(); }
+  function nextExam(){
+    if(!ex.fb){                                      // phase 1: commit + reveal feedback (may be -1 = skipped)
+      ex.answers[ex.pos]=ex.sel; ex.fb=true; render(); return;
+    }
+    ex.fb=false;                                     // phase 2: advance
+    if(ex.pos+1>=ex.items.length){ finishExam(); return; }
+    ex.pos++; ex.sel=ex.answers[ex.pos]; render();
+  }
+  function finishExam(){
+    stopExamTimer(); cancelSeq();
+    if(ex.pos<ex.items.length && ex.answers[ex.pos]===-1) ex.answers[ex.pos]=ex.sel; // capture current on auto-submit
+    const items=ex.items, per={1:{c:0,t:0},2:{c:0,t:0},3:{c:0,t:0}}; let correct=0;
+    items.forEach((q,i)=>{ per[q.part].t++; if(ex.answers[i]===q.a){ correct++; per[q.part].c++; } });
+    ex.result={ correct, total:items.length, pct: items.length?Math.round(correct/items.length*100):0, per,
+      wrong: items.map((q,i)=>({q,i,sel:ex.answers[i]})).filter(o=>o.sel!==o.q.a) };
+    const h=examHistory();
+    h.push({ ts:Date.now(), lv:ex.lv, n:items.length, correct, perPart:[per[1].c+'/'+per[1].t, per[2].c+'/'+per[2].t, per[3].c+'/'+per[3].t] });
+    save('jpfc_exam_history', h);
+    go('exam-result');
+  }
+  function playListening(q){
+    const items=(q.script||'').split('\n').map(s=>s.trim()).filter(Boolean).map(line=>{
+      const m=/^([MFＭＦmf])\s*[:：]\s*(.*)$/.exec(line);
+      if(m){ const sp=m[1].toUpperCase(); return { text:m[2], pitch: (sp==='M'||sp==='Ｍ')?0.7:1.4 }; }
+      return { text:line, pitch:1.0 };
+    });
+    items.push({ text:q.q, pitch:1.0 });
+    speakSeq(items, 0.9);
+  }
+  function highlightQ(q,target){
+    let h=esc(q);
+    if(target){ const t=esc(target); if(t && h.indexOf(t)>=0) h=h.split(t).join('<span style="color:#7c6bd6;font-weight:800;border-bottom:2px solid #7c6bd6;padding-bottom:1px;">'+t+'</span>'); }
+    h=h.split('★').join('<span style="display:inline-block;min-width:24px;text-align:center;color:#ff6f9c;font-weight:800;">★</span>');
+    return h;
+  }
+
+  function viewExamLevel(){
+    const cards=EXAM_LEVELS.map(lv=>{ const on=lv==='N5'; const cnt=(EXAM[lv]||[]).length;
+      return `<div class="${on?'ex-lv':''}" data-lv="${lv}" style="cursor:${on?'pointer':'default'};border-radius:22px;padding:18px 20px;margin-bottom:14px;background:${on?'#fff':'#f6f3fb'};border:1px solid ${on?'#eee6fb':'#efeafa'};opacity:${on?1:.6};display:flex;align-items:center;gap:14px;box-shadow:${on?'0 10px 24px -18px rgba(124,107,214,.6)':'none'};">
+        <div style="width:52px;height:52px;border-radius:16px;background:${on?'linear-gradient(135deg,#8a76e8,#b58fe6)':'#e6dff5'};color:#fff;display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:900;flex-shrink:0;">${lv}</div>
+        <div style="flex:1;"><div style="font-size:16px;font-weight:700;color:#443c54;">ระดับ ${lv}</div><div style="font-size:12px;color:#a79fb6;margin-top:2px;">${on?(cnt+' ข้อในคลัง'):'เร็วๆ นี้'}</div></div>
+        <div style="color:#cfc7e0;font-size:20px;font-weight:700;">${on?'›':'🔒'}</div>
+      </div>`; }).join('');
+    return `<div class="scroll" style="position:absolute;inset:0;overflow-y:auto;padding:40px 22px 40px;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;">
+        <div id="ex-back" style="cursor:pointer;width:38px;height:38px;border-radius:12px;background:#fff;border:1px solid #f0eafa;display:flex;align-items:center;justify-content:center;font-size:18px;color:#7c6bd6;">‹</div>
+        <div style="font-size:20px;font-weight:700;color:#443c54;">ข้อสอบ JLPT</div>
+      </div>
+      <div style="font-size:13px;color:#a79fb6;margin:0 0 20px 52px;">เลือกระดับที่ต้องการสอบ</div>
+      ${cards}</div>`;
+  }
+
+  function viewExamSetup(){
+    const hist=examHistory().filter(h=>h.lv===ex.lv);
+    const last=hist.length?hist[hist.length-1]:null;
+    const best=hist.reduce((b,h)=>{ const p=Math.round(h.correct/h.n*100); return p>b?p:b; },0);
+    const summary = hist.length? `<div style="display:flex;gap:12px;margin-bottom:20px;">
+        <div style="flex:1;background:#eefaf4;border-radius:16px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:800;color:#34b183;">${best}%</div><div style="font-size:11px;color:#7dbfa4;font-weight:600;">คะแนนดีสุด</div></div>
+        <div style="flex:1;background:#f2eefb;border-radius:16px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:800;color:#7c6bd6;">${Math.round(last.correct/last.n*100)}%</div><div style="font-size:11px;color:#a79fb6;font-weight:600;">ครั้งล่าสุด</div></div>
+      </div>`:'';
+    const opts=[15,30,45].map(n=>`<div class="ex-opt" data-n="${n}" style="cursor:pointer;background:#fff;border:1px solid #eee6fb;border-radius:20px;padding:18px 20px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 10px 24px -18px rgba(124,107,214,.5);">
+        <div><div style="font-size:17px;font-weight:800;color:#443c54;">${n} ข้อ</div><div style="font-size:12px;color:#a79fb6;margin-top:2px;">เวลา ${EXAM_TIME[n]} นาที</div></div>
+        <div style="background:linear-gradient(135deg,#8a76e8,#b58fe6);color:#fff;font-size:13px;font-weight:700;padding:9px 18px;border-radius:16px;">เริ่ม →</div>
+      </div>`).join('');
+    return `<div class="scroll" style="position:absolute;inset:0;overflow-y:auto;padding:40px 22px 40px;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;">
+        <div id="ex-back" style="cursor:pointer;width:38px;height:38px;border-radius:12px;background:#fff;border:1px solid #f0eafa;display:flex;align-items:center;justify-content:center;font-size:18px;color:#7c6bd6;">‹</div>
+        <div style="font-size:20px;font-weight:700;color:#443c54;">ข้อสอบ ${ex.lv}</div>
+      </div>
+      <div style="font-size:13px;color:#a79fb6;margin:0 0 20px 52px;">เลือกจำนวนข้อ · เฉลยทันทีหลังตอบทุกข้อ</div>
+      ${summary}${opts}
+      <div style="font-size:12px;color:#b7afc6;text-align:center;margin-top:8px;line-height:1.7;">แบ่งเป็น 3 พาร์ท ตามสัดส่วนจริง<br>文字・語彙 / 文法・読解 / 聴解</div>
+    </div>`;
+  }
+
+  function viewExamQ(){
+    const q=ex.items[ex.pos], pm=PART_META[q.part], n=ex.items.length, prog=Math.round(ex.pos/n*100);
+    const passage = q.passage? `<div style="background:#faf7ff;border:1px solid #f0eafa;border-radius:16px;padding:14px;margin-bottom:14px;font-size:15px;line-height:1.8;color:#3a3350;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${esc(q.passage)}</div>`:'';
+    const listen = q.type==='listening'? `<button id="ex-listen" style="cursor:pointer;border:none;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#eafaf3;color:#34b183;font-size:15px;font-weight:700;padding:14px;border-radius:16px;margin-bottom:16px;">▶ ฟังโจทย์</button>`:'';
+    const choices=q.choices.map((c,i)=>{ const sd=ex.sel===i;
+      let bd=sd?'#7c6bd6':'#eee6fb', bg=sd?'#f2eefb':'#fff', dotBg=sd?'#7c6bd6':'#f0ebfb', dotC=sd?'#fff':'#a79fb6', dot=String(i+1), op=1;
+      if(ex.fb){
+        if(i===q.a){ bd='#34b183'; bg='#eafaf3'; dotBg='#34b183'; dotC='#fff'; dot='✓'; }
+        else if(sd){ bd='#ff6f9c'; bg='#fff1f5'; dotBg='#ff6f9c'; dotC='#fff'; dot='✕'; }
+        else { op=.45; }
+      }
+      return `<button class="ex-ch" data-i="${i}" style="cursor:${ex.fb?'default':'pointer'};opacity:${op};text-align:left;width:100%;border:2px solid ${bd};background:${bg};color:#443c54;font-size:16px;font-weight:${(sd||(ex.fb&&i===q.a))?700:500};padding:15px 16px;border-radius:16px;margin-bottom:10px;display:flex;align-items:center;gap:12px;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">
+        <span style="flex-shrink:0;width:24px;height:24px;border-radius:50%;background:${dotBg};color:${dotC};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;">${dot}</span>
+        <span>${esc(c)}</span></button>`; }).join('');
+    const last=ex.pos+1>=n;
+    let fbBox='';
+    if(ex.fb){
+      const ok=ex.sel===q.a;
+      const head= ok? `<div style="font-size:14px;font-weight:800;color:#34b183;margin-bottom:6px;">🎉 ถูกต้อง!</div>`
+        : `<div style="font-size:14px;font-weight:800;color:#ff6f9c;margin-bottom:6px;">${ex.sel<0?'⏭ ไม่ได้ตอบ':'❌ ยังไม่ถูก'} · คำตอบคือ ${esc(q.choices[q.a])}</div>`;
+      const scriptBlock=q.type==='listening'? `<div style="font-size:13px;color:#8a83a0;line-height:1.9;background:#fff;border-radius:10px;padding:8px 10px;margin-top:8px;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${(q.script||'').split('\n').map(l=>esc(l).replace(/^M\s*[:：]\s*/,'👨 ').replace(/^F\s*[:：]\s*/,'👩 ')).join('<br>')}</div>`:'';
+      fbBox=`<div style="background:${ok?'#f3fbf7':'#fff7fa'};border:1px solid ${ok?'#d7f0e3':'#ffdfe9'};border-radius:16px;padding:13px 14px;margin:2px 0 8px;">
+        ${head}<div style="font-size:13px;color:#7a7290;line-height:1.8;">${esc(q.exp||'')}</div>${scriptBlock}</div>`;
+    }
+    return `<div style="position:absolute;inset:0;display:flex;flex-direction:column;padding:36px 20px 20px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <div id="ex-close" style="cursor:pointer;width:34px;height:34px;border-radius:11px;background:#fff;border:1px solid #f0eafa;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8a83a0;flex-shrink:0;">✕</div>
+        <div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:800;color:#443c54;">${pm.jp} <span style="font-size:11px;font-weight:600;color:#a79fb6;">${pm.th}</span></div></div>
+        <div id="exam-timer" style="font-size:15px;font-weight:800;color:#7c6bd6;background:#f2eefb;padding:5px 12px;border-radius:12px;min-width:58px;text-align:center;flex-shrink:0;">${fmtTime(ex.deadline-Date.now())}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <div style="flex:1;height:7px;background:#efeafa;border-radius:5px;overflow:hidden;"><div style="height:100%;width:${prog}%;background:linear-gradient(90deg,#8a76e8,#b58fe6);border-radius:5px;transition:width .3s ease;"></div></div>
+        <div style="font-size:12px;font-weight:700;color:#7c6bd6;">${ex.pos+1}/${n}</div>
+      </div>
+      <div class="scroll" style="flex:1;overflow-y:auto;">
+        ${passage}${listen}
+        <div style="font-size:19px;font-weight:600;color:#3a3350;line-height:1.8;margin-bottom:18px;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${highlightQ(q.q,q.target)}</div>
+        ${choices}${fbBox}
+      </div>
+      <button id="ex-next" style="cursor:pointer;width:100%;border:none;background:${(!ex.fb&&ex.sel<0)?'#e6dff5':'linear-gradient(135deg,#8a76e8,#b58fe6)'};color:${(!ex.fb&&ex.sel<0)?'#a79fb6':'#fff'};font-size:16px;font-weight:700;padding:16px;border-radius:18px;margin-top:12px;box-shadow:${(!ex.fb&&ex.sel<0)?'none':'0 14px 26px -14px rgba(138,118,232,.75)'};">${ex.fb?(last?'ดูผลสอบ':'ข้อถัดไป →'):'ตรวจคำตอบ'}</button>
+    </div>`;
+  }
+
+  function viewExamResult(){
+    const r=ex.result, pass=r.pct>=60;
+    const partRows=[1,2,3].map(p=>{ const x=r.per[p]; if(!x.t) return ''; const pm=PART_META[p]; const pct=Math.round(x.c/x.t*100);
+      return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+        <div style="width:70px;font-size:12px;font-weight:700;color:#443c54;flex-shrink:0;">${pm.jp}</div>
+        <div style="flex:1;height:8px;background:#efeafa;border-radius:5px;overflow:hidden;"><div style="height:100%;width:${pct}%;background:${pct>=60?'#34b183':'#ff6f9c'};border-radius:5px;"></div></div>
+        <div style="font-size:12px;font-weight:700;color:#7c6bd6;min-width:38px;text-align:right;">${x.c}/${x.t}</div>
+      </div>`; }).join('');
+    const wrong=r.wrong.map(o=>{ const q=o.q;
+      const yourTxt=o.sel<0?'<span style="color:#c99;">ไม่ได้ตอบ</span>':esc(q.choices[o.sel]);
+      const rep=q.type==='listening'?`<button class="rev-listen" data-i="${o.i}" style="cursor:pointer;border:none;background:#eafaf3;color:#34b183;font-size:12px;font-weight:700;padding:6px 12px;border-radius:12px;margin-top:8px;">▶ ฟังอีกครั้ง</button>`:'';
+      return `<div style="background:#fff;border:1px solid #f1ebfb;border-radius:16px;padding:14px;margin-bottom:10px;text-align:left;">
+        <div style="font-size:15px;font-weight:600;color:#3a3350;line-height:1.7;margin-bottom:8px;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${highlightQ(q.q,q.target)}</div>
+        <div style="font-size:13px;color:#ff6f9c;margin-bottom:3px;">คำตอบของคุณ: ${yourTxt}</div>
+        <div style="font-size:13px;color:#34b183;margin-bottom:6px;">คำตอบที่ถูก: <b>${esc(q.choices[q.a])}</b></div>
+        <div style="font-size:12px;color:#7a7290;line-height:1.7;background:#faf7ff;border-radius:10px;padding:8px 10px;">${esc(q.exp||'')}</div>${rep}
+      </div>`; }).join('');
+    const wrongBlock = r.wrong.length? `<div style="text-align:left;margin:6px 0 18px;"><div style="font-size:14px;font-weight:700;color:#443c54;margin-bottom:10px;">ทบทวนข้อที่ผิด (${r.wrong.length})</div>${wrong}</div>` : `<div style="font-size:14px;color:#34b183;font-weight:700;margin:14px 0 20px;">ตอบถูกทุกข้อ เยี่ยมมาก!</div>`;
+    return `<div class="scroll" style="position:absolute;inset:0;overflow-y:auto;padding:44px 22px 30px;text-align:center;">
+      <div style="width:88px;height:88px;border-radius:50%;margin:0 auto;background:linear-gradient(135deg,${pass?'#d7f4e6,#c9f0dd':'#ffd7e6,#ffe0ec'});display:flex;align-items:center;justify-content:center;font-size:42px;">${pass?'🎊':'💪'}</div>
+      <div style="font-size:22px;font-weight:800;color:#443c54;margin-top:14px;">${r.correct} / ${r.total} ข้อ</div>
+      <div style="font-size:44px;font-weight:900;color:${pass?'#34b183':'#ff6f9c'};line-height:1.1;margin-top:2px;">${r.pct}<span style="font-size:20px;">%</span></div>
+      <div style="display:inline-block;margin-top:8px;font-size:12px;font-weight:700;color:${pass?'#34b183':'#ff6f9c'};background:${pass?'#eafaf3':'#fff1f5'};padding:5px 14px;border-radius:14px;">${pass?'ผ่านเกณฑ์':'ยังไม่ผ่านเกณฑ์'} · เกณฑ์อย่างไม่เป็นทางการ ~60%</div>
+      <div style="background:#fff;border:1px solid #f1ebfb;border-radius:18px;padding:16px;margin:20px 0;">${partRows}</div>
+      ${wrongBlock}
+      <button id="ex-again" style="cursor:pointer;width:100%;border:none;background:linear-gradient(135deg,#8a76e8,#b58fe6);color:#fff;font-size:16px;font-weight:700;padding:16px;border-radius:20px;box-shadow:0 14px 26px -14px rgba(138,118,232,.75);margin-bottom:12px;">ทำอีกครั้ง</button>
+      <button id="ex-home" style="cursor:pointer;width:100%;border:none;background:#f2eefb;color:#7c6bd6;font-size:15px;font-weight:700;padding:15px;border-radius:20px;">กลับหน้าหลัก</button>
+    </div>`;
+  }
+
+  // ============================================================
+  //  SHADOWING MODE
+  // ============================================================
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let SHADOW_ITEMS = null;
+  function shadowItems(){
+    if(SHADOW_ITEMS) return SHADOW_ITEMS;
+    const seen={}, out=[];
+    WORDS.forEach(w=>{ if(w.ej && !seen[w.ej]){ seen[w.ej]=1; out.push({ ej:w.ej, er:w.er, et:w.et, k:w.k, th:w.th }); } });
+    SHADOW_ITEMS=out; return out;
+  }
+  const shadowScores = load('jpfc_shadow_scores', {});
+  let shadowRate = load('jpfc_shadow_rate', 0.8);
+  const sh = { queue:[], pos:0, showReading:false, showThai:false, recogText:null, recogSim:null };
+  const rec = { mr:null, chunks:[], url:null, stream:null, on:false };
+
+  function shadowCur(){ return sh.queue[sh.pos] || null; }
+  function startShadow(){
+    const items=shadowItems().slice(); shuffle(items);
+    sh.queue=items; sh.pos=0; sh.showReading=false; sh.showThai=false; sh.recogText=null; sh.recogSim=null;
+    clearRec(); go('shadow');
+  }
+  function clearRec(){ if(rec.url){ try{ URL.revokeObjectURL(rec.url); }catch(e){} rec.url=null; } rec.chunks=[]; }
+  function stopMic(){ if(rec.stream){ try{ rec.stream.getTracks().forEach(t=>t.stop()); }catch(e){} rec.stream=null; } }
+  function stopShadow(){ if(rec.on){ try{ rec.mr && rec.mr.state!=='inactive' && rec.mr.stop(); }catch(e){} } rec.on=false; stopMic(); clearRec(); cancelSeq(); try{ if(window.speechSynthesis) speechSynthesis.cancel(); }catch(e){} }
+
+  function toggleRecord(){
+    if(rec.on){ try{ rec.mr && rec.mr.state!=='inactive' && rec.mr.stop(); }catch(e){} return; }
+    if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)){
+      alert('อุปกรณ์นี้ไม่รองรับการอัดเสียง แต่ยังฝึกฟังและพูดตามได้ตามปกติ'); return;
+    }
+    navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+      clearRec(); rec.stream=stream;
+      let mr; try{ mr=new MediaRecorder(stream); }catch(e){ mr=new MediaRecorder(stream); }
+      rec.mr=mr; rec.chunks=[];
+      mr.ondataavailable=e=>{ if(e.data && e.data.size) rec.chunks.push(e.data); };
+      mr.onstop=()=>{
+        try{ const blob=new Blob(rec.chunks, {type:(rec.chunks[0]&&rec.chunks[0].type)||'audio/webm'});
+          if(rec.url){ try{ URL.revokeObjectURL(rec.url); }catch(e){} }
+          rec.url=URL.createObjectURL(blob);
+        }catch(e){}
+        rec.on=false; stopMic(); if(st.screen==='shadow') render();
+      };
+      mr.start(); rec.on=true; if(st.screen==='shadow') render();
+    }).catch(()=>{ alert('เข้าถึงไมโครโฟนไม่ได้ (อาจถูกปฏิเสธสิทธิ์) — ยังฝึกฟังและพูดตามได้ตามปกติ'); rec.on=false; stopMic(); if(st.screen==='shadow') render(); });
+  }
+  function playMine(){ if(!rec.url) return; try{ new Audio(rec.url).play().catch(()=>{}); }catch(e){} }
+  function playCompare(){
+    const it=shadowCur(); if(!it) return;
+    if(window.speechSynthesis){
+      speechSynthesis.cancel();
+      try{ const u=new SpeechSynthesisUtterance(it.ej); u.lang='ja-JP'; u.rate=shadowRate; if(jaVoice)u.voice=jaVoice;
+        u.onend=()=>{ if(rec.url){ try{ new Audio(rec.url).play().catch(()=>{}); }catch(e){} } };
+        speechSynthesis.speak(u); }catch(e){}
+    } else if(rec.url){ try{ new Audio(rec.url).play().catch(()=>{}); }catch(e){} }
+  }
+  function rateShadow(r){
+    const it=shadowCur(); if(!it) return;
+    shadowScores[it.ej]=r; save('jpfc_shadow_scores', shadowScores);
+    stopShadow(); // release mic / stop any playback
+    sh.recogText=null; sh.recogSim=null; sh.showReading=false; sh.showThai=false;
+    if(r==='again'){ const insertAt=Math.min(sh.queue.length, sh.pos+4); sh.queue.splice(insertAt,0,it); } // re-drill later
+    sh.pos++;
+    if(sh.pos>=sh.queue.length){ sh.pos=Math.max(0, sh.queue.length-1); } // clamp at end
+    render();
+  }
+
+  // ---- optional AI auto-score via SpeechRecognition ----
+  function normJa(s){ return String(s||'').replace(/[\s、。！？!?.,・「」『』（）()　]/g,''); }
+  function lev(a,b){ const m=a.length,n=b.length; if(!m)return n; if(!n)return m; const d=[]; for(let i=0;i<=m;i++)d[i]=[i]; for(let j=0;j<=n;j++)d[0][j]=j;
+    for(let i=1;i<=m;i++)for(let j=1;j<=n;j++){ d[i][j]=Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); } return d[m][n]; }
+  function simRatio(said, ej, er){
+    const s=normJa(said); let best=0;
+    [normJa(ej), normJa(er)].forEach(c=>{ const L=Math.max(c.length, s.length)||1; const r=1-lev(s,c)/L; if(r>best)best=r; });
+    return Math.round(Math.max(0,best)*100);
+  }
+  function aiListen(){
+    if(!SR) return; const it=shadowCur(); if(!it) return;
+    let r; try{ r=new SR(); }catch(e){ return; }
+    r.lang='ja-JP'; r.interimResults=false; r.maxAlternatives=1;
+    sh.recogText='กำลังฟัง...'; sh.recogSim=null; render();
+    r.onresult=e=>{ const txt=(e.results[0][0].transcript)||''; sh.recogText=txt; sh.recogSim=simRatio(txt, it.ej, it.er); render(); };
+    r.onerror=()=>{ sh.recogText='ฟังไม่สำเร็จ ลองใหม่'; sh.recogSim=null; render(); };
+    r.onend=()=>{ if(sh.recogText==='กำลังฟัง...'){ sh.recogText='ไม่ได้ยินเสียง ลองใหม่'; render(); } };
+    try{ r.start(); }catch(e){}
+  }
+
+  function viewShadow(){
+    const it=shadowCur();
+    const back=`<div id="sh-back" style="cursor:pointer;width:34px;height:34px;border-radius:11px;background:#fff;border:1px solid #f0eafa;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8a83a0;flex-shrink:0;">✕</div>`;
+    if(!it){ return `<div style="position:absolute;inset:0;padding:40px 22px;"><div style="display:flex;gap:12px;align-items:center;">${back}<div style="font-size:20px;font-weight:700;color:#443c54;">ชาโดวิง</div></div><div style="text-align:center;color:#a79fb6;margin-top:60px;">ไม่มีประโยคให้ฝึก</div></div>`; }
+    const n=sh.queue.length, score=shadowScores[it.ej];
+    const scoreTag = score? `<span style="font-size:11px;font-weight:700;color:#7c6bd6;background:#f2eefb;padding:3px 10px;border-radius:12px;">${score==='good'?'ดีมาก':score==='ok'?'พอใช้':'ลองใหม่'}</span>`:'';
+    const readingLine = sh.showReading? `<div style="font-size:15px;color:#b0a8c2;margin-top:12px;line-height:1.7;letter-spacing:.5px;">${esc(it.er)}</div>`:'';
+    const thaiLine = sh.showThai? `<div style="font-size:15px;color:#7a7290;margin-top:8px;line-height:1.7;">${esc(it.et)}</div>`:'';
+    const recBtn = rec.on
+      ? `<button id="sh-rec" style="cursor:pointer;border:none;flex:1;background:#ff6f9c;color:#fff;font-size:14px;font-weight:700;padding:13px;border-radius:16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;">■ หยุดอัด</button>`
+      : `<button id="sh-rec" style="cursor:pointer;border:none;flex:1;background:#fff1f5;color:#ff6f9c;font-size:14px;font-weight:700;padding:13px;border-radius:16px;display:inline-flex;align-items:center;justify-content:center;gap:6px;">🎙 อัดเสียง</button>`;
+    const recogBlock = sh.recogText!=null? (function(){ const sim=sh.recogSim; const col= sim==null?'#a79fb6': sim>=80?'#34b183': sim>=55?'#e0a020':'#ff6f9c';
+      return `<div style="background:#faf7ff;border:1px solid #f0eafa;border-radius:16px;padding:12px 14px;margin-bottom:14px;text-align:left;">
+        <div style="font-size:11px;color:#b7afc6;font-weight:600;margin-bottom:4px;">AI ได้ยินว่า</div>
+        <div style="font-size:16px;color:#3a3350;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${esc(sh.recogText)}</div>
+        ${sim!=null?`<div style="font-size:14px;font-weight:800;color:${col};margin-top:6px;">ความใกล้เคียง ${sim}%</div>`:''}
+      </div>`; })() : '';
+    return `<div style="position:absolute;inset:0;display:flex;flex-direction:column;padding:36px 20px 20px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+        ${back}
+        <div style="flex:1;font-size:18px;font-weight:700;color:#443c54;">ชาโดวิง</div>
+        <div style="font-size:12px;font-weight:700;color:#7c6bd6;">ประโยคที่ ${sh.pos+1} / ${n}</div>
+      </div>
+      <div class="scroll" style="flex:1;overflow-y:auto;">
+        <div style="background:#fff;border:1px solid #f2edfb;border-radius:24px;padding:22px;box-shadow:0 16px 34px -24px rgba(124,107,214,.6);margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:11px;font-weight:700;color:#34b183;background:#eafaf3;padding:3px 11px;border-radius:20px;">ประโยค</span>${scoreTag}
+          </div>
+          <div style="font-size:24px;font-weight:600;color:#3a3350;line-height:1.7;font-family:'Zen Maru Gothic','Noto Sans JP',sans-serif;">${esc(it.ej)}</div>
+          ${readingLine}${thaiLine}
+          <div style="font-size:12px;color:#b7afc6;margin-top:14px;border-top:1px dashed #ece6f7;padding-top:10px;">จาก: <b style="color:#7c6bd6;">${esc(it.k)}</b> — ${esc(it.th)}</div>
+        </div>
+        <div style="display:flex;gap:10px;margin-bottom:14px;">
+          <button id="sh-tr" style="cursor:pointer;border:none;flex:1;background:${sh.showReading?'#7c6bd6':'#f0ebfb'};color:${sh.showReading?'#fff':'#7c6bd6'};font-size:13px;font-weight:700;padding:11px;border-radius:14px;">${sh.showReading?'ซ่อน':'แสดง'}คำอ่าน</button>
+          <button id="sh-th" style="cursor:pointer;border:none;flex:1;background:${sh.showThai?'#34b183':'#eafaf3'};color:${sh.showThai?'#fff':'#34b183'};font-size:13px;font-weight:700;padding:11px;border-radius:14px;">${sh.showThai?'ซ่อน':'แสดง'}คำแปล</button>
+        </div>
+        <div style="background:#faf7ff;border-radius:16px;padding:12px 14px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;"><span style="font-size:13px;font-weight:600;color:#443c54;">ความเร็วเสียง</span><span id="sh-rate-val" style="font-size:13px;font-weight:700;color:#7c6bd6;">${shadowRate.toFixed(2).replace(/0$/,'')}×</span></div>
+          <input id="sh-rate" type="range" min="0.5" max="1.0" step="0.05" value="${shadowRate}" style="width:100%;margin-top:8px;">
+        </div>
+        <button id="sh-play" style="cursor:pointer;border:none;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,#8a76e8,#b58fe6);color:#fff;font-size:16px;font-weight:700;padding:15px;border-radius:16px;box-shadow:0 14px 26px -16px rgba(138,118,232,.75);margin-bottom:12px;">${spk(18)} ฟัง</button>
+        <div style="display:flex;gap:10px;margin-bottom:12px;">
+          ${recBtn}
+          <button id="sh-mine" ${rec.url?'':'disabled'} style="cursor:${rec.url?'pointer':'default'};border:none;flex:1;background:#f0ebfb;color:#7c6bd6;opacity:${rec.url?1:.5};font-size:14px;font-weight:700;padding:13px;border-radius:16px;">▶ เสียงฉัน</button>
+          <button id="sh-cmp" ${rec.url?'':'disabled'} style="cursor:${rec.url?'pointer':'default'};border:none;flex:1;background:#eafaf3;color:#34b183;opacity:${rec.url?1:.5};font-size:14px;font-weight:700;padding:13px;border-radius:16px;">ฟังเทียบ</button>
+        </div>
+        ${SR?`<button id="sh-ai" style="cursor:pointer;border:none;width:100%;background:#fff;border:2px solid #eee6fb;color:#7c6bd6;font-size:14px;font-weight:700;padding:12px;border-radius:16px;margin-bottom:14px;">🤖 ให้ AI ฟัง</button>`:''}
+        ${recogBlock}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button id="sh-again" style="cursor:pointer;border:none;flex:1;background:#fff1f5;color:#ff6f9c;font-size:14px;font-weight:700;padding:14px;border-radius:16px;">อีกครั้ง</button>
+        <button id="sh-ok" style="cursor:pointer;border:none;flex:1;background:#fff7e8;color:#e0a020;font-size:14px;font-weight:700;padding:14px;border-radius:16px;">พอใช้</button>
+        <button id="sh-good" style="cursor:pointer;border:none;flex:1;background:#eafaf3;color:#34b183;font-size:14px;font-weight:700;padding:14px;border-radius:16px;">ดีมาก</button>
+      </div>
+    </div>`;
+  }
+
   // ---------- render + wiring ----------
   function render(){
     const app=$('app');
@@ -466,6 +840,11 @@
     else if(st.screen==='decks') app.innerHTML=viewDecks();
     else if(st.screen==='study') app.innerHTML=viewStudy();
     else if(st.screen==='summary') app.innerHTML=viewSummary();
+    else if(st.screen==='exam-level') app.innerHTML=viewExamLevel();
+    else if(st.screen==='exam-setup') app.innerHTML=viewExamSetup();
+    else if(st.screen==='exam-q') app.innerHTML=viewExamQ();
+    else if(st.screen==='exam-result') app.innerHTML=viewExamResult();
+    else if(st.screen==='shadow') app.innerHTML=viewShadow();
     wire();
   }
   function on(id,ev,fn){ const e=$(id); if(e) e.addEventListener(ev,fn); }
@@ -474,6 +853,8 @@
       on('gear','click',openSheet);
       on('cta','click',()=>go('decks'));
       on('seeall','click',()=>go('decks'));
+      on('nav-exam','click',()=>go('exam-level'));
+      on('nav-shadow','click',startShadow);
       document.querySelectorAll('.deck-row').forEach(el=>el.addEventListener('click',()=>startDeck(el.dataset.deck)));
     } else if(st.screen==='decks'){
       on('back','click',()=>go('home'));
@@ -491,6 +872,35 @@
       on('again','click',reviewAgain);
       on('finish','click',()=>go('home'));
       document.querySelectorAll('.rev-play').forEach(el=>el.addEventListener('click',()=>speak(WORDS[+el.dataset.i].k)));
+    } else if(st.screen==='exam-level'){
+      on('ex-back','click',()=>go('home'));
+      document.querySelectorAll('.ex-lv').forEach(el=>el.addEventListener('click',()=>{ ex.lv=el.dataset.lv; go('exam-setup'); }));
+    } else if(st.screen==='exam-setup'){
+      on('ex-back','click',()=>go('exam-level'));
+      document.querySelectorAll('.ex-opt').forEach(el=>el.addEventListener('click',()=>startExam(+el.dataset.n)));
+    } else if(st.screen==='exam-q'){
+      const q=ex.items[ex.pos];
+      on('ex-close','click',()=>{ stopExamTimer(); cancelSeq(); go('home'); });
+      on('ex-listen','click',()=>playListening(q));
+      document.querySelectorAll('.ex-ch').forEach(el=>el.addEventListener('click',()=>selectChoice(+el.dataset.i)));
+      on('ex-next','click',nextExam);
+    } else if(st.screen==='exam-result'){
+      on('ex-again','click',()=>go('exam-setup'));
+      on('ex-home','click',()=>go('home'));
+      document.querySelectorAll('.rev-listen').forEach(el=>el.addEventListener('click',()=>playListening(ex.items[+el.dataset.i])));
+    } else if(st.screen==='shadow'){
+      on('sh-back','click',()=>{ stopShadow(); go('home'); });
+      on('sh-tr','click',()=>{ sh.showReading=!sh.showReading; render(); });
+      on('sh-th','click',()=>{ sh.showThai=!sh.showThai; render(); });
+      on('sh-play','click',()=>{ const it=shadowCur(); if(it) speak(it.ej,{rate:shadowRate}); });
+      on('sh-rec','click',toggleRecord);
+      on('sh-mine','click',playMine);
+      on('sh-cmp','click',playCompare);
+      on('sh-ai','click',aiListen);
+      on('sh-again','click',()=>rateShadow('again'));
+      on('sh-ok','click',()=>rateShadow('ok'));
+      on('sh-good','click',()=>rateShadow('good'));
+      const sr=$('sh-rate'); if(sr) sr.oninput=function(){ shadowRate=parseFloat(this.value); const v=$('sh-rate-val'); if(v) v.textContent=shadowRate.toFixed(2).replace(/0$/,'')+'×'; save('jpfc_shadow_rate',shadowRate); };
     }
   }
 
